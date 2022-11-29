@@ -1,6 +1,5 @@
-use std::fs;
-
 use rand::Rng;
+use std::fs;
 
 struct Chip8 {
     memory: [u8; 4096],
@@ -10,6 +9,10 @@ struct Chip8 {
     program_counter: usize,
     stack_pointer: usize,
     stack: [u16; 16],
+    keypad: [[bool; 4]; 4],
+    delay_timer: u8,
+    sound_timer: u8,
+    sprite: [[0xF0, 0x90, 0x90, 0x90, 0xF0]] 
 }
 
 impl Chip8 {
@@ -29,14 +32,14 @@ impl Chip8 {
     }
 
     // The interpreter sets the program counter to nnn.
-    fn op_1nnn(&mut self, nnn: u16) {
+    fn op_1nnn(&mut self, nnn: usize) {
         self.program_counter = nnn
     }
 
     // The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
-    fn op_2nnn(&mut self, nnn: u16) {
+    fn op_2nnn(&mut self, nnn: usize) {
         self.stack_pointer += 1;
-        self.stack[self.stack_pointer as usize] = self.program_counter;
+        self.stack[self.stack_pointer] = self.program_counter as u16;
         self.program_counter = nnn
     }
 
@@ -67,8 +70,8 @@ impl Chip8 {
     }
 
     // Adds the value kk to the value of register Vx, then stores the result in Vx.
-    fn op_7xkk(vx: &mut u8, kk: u8) {
-        *vx += kk
+    fn op_7xkk(&mut self, vx: u8, kk: u8) {
+        self.registers[vx as usize] += kk
     }
 
     // Stores the value of register Vy in register Vx.
@@ -76,71 +79,80 @@ impl Chip8 {
         self.registers[vx as usize] = self.registers[vy as usize]
     }
 
+    // VX = VX OR VY
     fn op_8xy1(&mut self, vx: u8, vy: u8) {
         self.registers[vx as usize] = self.registers[vx as usize] | self.registers[vy as usize]
     }
 
-    fn _8xy2(mut vx: u8, vy: u8) {
-        vx = vx & vy
+    // VX = VX & VY
+    fn op_8xy2(&mut self, vx: u8, vy: u8) {
+        self.registers[vx as usize] = self.registers[vx as usize] & self.registers[vy as usize]
     }
 
-    fn _8xy3(mut vx: u8, vy: u8) {
-        vx = vx ^ vy
+    // VX = VX XOR VY
+    fn op_8xy3(&mut self, vx: u8, vy: u8) {
+        self.registers[vx as usize] = self.registers[vx as usize] ^ self.registers[vy as usize]
     }
 
-    fn _8xy4(mut vx: u8, vy: u8, mut vf: u8) {
-        if (vx + vy > 255) {
-            vf = 1;
+    // Add VY to VX and store the result in VX
+    // If the sum is larger than 255 mark the carry flag to 1
+    fn op_8xy4(&mut self, vx: u8, vy: u8) {
+        if self.registers[vx as usize] + self.registers[vy as usize] > 255 {
+            self.registers[15] = 1;
         } else {
-            vf = 0;
+            self.registers[15] = 0;
         }
 
-        vx += vy
+        self.registers[vx as usize] += self.registers[vy as usize]
     }
 
-    fn _8xy5(mut vx: u8, vy: u8, mut vf: u8) {
-        if (vx > vy) {
-            vf = 1;
+    // If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
+    fn op_8xy5(&mut self, vx: u8, vy: u8) {
+        if self.registers[vx as usize] > self.registers[vy as usize] {
+            self.registers[15] = 1;
         } else {
-            vf = 0;
+            self.registers[15] = 0;
         }
 
-        vx -= vy
+        self.registers[vx as usize] -= self.registers[vy as usize]
     }
 
-    fn _8xy6(mut vx: u8, mut vf: u8) {
-        if ((vx & 1) == 1) {
-            vf = 1;
+    // If the least-significant bit of Vx is 1, then VF is set to 1, otherwise 0. Then Vx is divided by 2.
+    fn op_8xy6(&mut self, vx: u8) {
+        if (self.registers[vx as usize] & 1) == 1 {
+            self.registers[15] = 1;
         } else {
-            vf = 0;
+            self.registers[15] = 0;
         }
 
-        vx = vx >> 1
+        self.registers[vx as usize] = self.registers[vx as usize] >> 1
     }
 
-    fn _8xy7(mut vx: u8, vy: u8, mut vf: u8) {
-        if (vy > vx) {
-            vf = 1;
+    // If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
+    fn op_8xy7(&mut self, vx: u8, vy: u8) {
+        if self.registers[vy as usize] > self.registers[vx as usize] {
+            self.registers[15] = 1;
         } else {
-            vf = 0;
+            self.registers[15] = 0;
         }
 
-        vx = vy - vx
+        self.registers[vx as usize] = self.registers[vy as usize] - self.registers[vx as usize]
     }
 
-    fn _8xye(mut vx: u8, vy: u8, mut vf: u8) {
-        if ((vx << 7) & 1 == 1) {
-            vf = 1;
+    // If the most-significant bit of Vx is 1, then VF is set to 1, otherwise to 0. Then Vx is multiplied by 2.
+    fn op_8xye(&mut self, vx: u8, vy: u8) {
+        if ((self.registers[vx as usize] >> 7) & 1) == 1 {
+            self.registers[15] = 1;
         } else {
-            vf = 0;
+            self.registers[15] = 0;
         }
 
-        vx = vx * 2
+        self.registers[vx as usize] *= 2
     }
 
     // The value of register I is set to nnn
-    fn _annn(mut I: u16, nnn: u16) {
-        I = nnn
+    fn op_annn(&mut self, nnn: usize) {
+        self.i = nnn
     }
 
     // The program counter is set to nnn plus the value of V0.
@@ -158,10 +170,13 @@ impl Chip8 {
 
     // The values of I and Vx are added, and the results are stored in I.
     fn op_fx1e(&mut self, vx: u8) {
-        self.i += self.registers[vx as usize] as u16
+        self.i += self.registers[vx as usize] as usize
     }
 
-    fn op_fx29(&mut self) {}
+    // The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx.
+    fn op_fx29(&mut self) {
+	
+    }
 
     // The interpreter copies the values of registers V0 through Vx into memory, starting at the address in I.
     fn op_fx55(&mut self, x: u8) {
@@ -192,4 +207,12 @@ impl Chip8 {
             self.memory[addr + i as usize] = self.memory[addr + i as usize] ^ byte;
         }
     }
+
+    // Load ROM into memory
+    fn load() {}
+
+    // Game Loop
+    fn tick() {}
 }
+
+fn main() {}
