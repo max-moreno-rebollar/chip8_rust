@@ -1,6 +1,15 @@
 use rand::Rng;
 use std::fs;
 
+pub const FONT: [u8; 81] = [
+    0xF0, 0x90, 0x90, 0x90, 0xF0, 0x20, 0x60, 0x20, 0x20, 0x70, 0xF0, 0x10, 0xF0, 0x80, 0xF0, 0x10,
+    0xF0, 0x80, 0xF0, 0xF0, 0x10, 0xF0, 0x10, 0xF0, 0x90, 0x90, 0xF0, 0x10, 0x10, 0xF0, 0xF0, 0x80,
+    0xF0, 0x10, 0xF0, 0xF0, 0x10, 0x20, 0x40, 0x40, 0xF0, 0x90, 0xF0, 0x90, 0xF0, 0xF0, 0x90, 0xF0,
+    0x10, 0xF0, 0xF0, 0x90, 0xF0, 0x90, 0x90, 0xE0, 0x90, 0xE0, 0x90, 0xE0, 0xF0, 0x80, 0x80, 0x80,
+    0xF0, 0xE0, 0x90, 0x90, 0x90, 0x90, 0xE0, 0xF0, 0x80, 0xF0, 0x80, 0xF0, 0xF0, 0x80, 0xF0, 0x80,
+    0x80,
+];
+
 struct Chip8 {
     memory: [u8; 4096],
     registers: [u8; 16],
@@ -9,10 +18,10 @@ struct Chip8 {
     program_counter: usize,
     stack_pointer: usize,
     stack: [u16; 16],
-    keypad: [[bool; 4]; 4],
+    keypad: [bool; 16],
+    waiting_for_keypress: bool,
     delay_timer: u8,
     sound_timer: u8,
-    sprite: [[0xF0, 0x90, 0x90, 0x90, 0xF0]] 
 }
 
 impl Chip8 {
@@ -156,16 +165,16 @@ impl Chip8 {
     }
 
     // The program counter is set to nnn plus the value of V0.
-    fn _bnnn(mut program_counter: u16, nnn: u16, v0: u8) {
-        program_counter = nnn + v0 as u16
+    fn op_bnnn(&mut self, nnn: u16) {
+        self.program_counter = (nnn + self.registers[0] as u16) as usize
     }
 
     // The interpreter generates a random number from 0 to 255, which is then ANDed with the value kk. The results are stored in Vx.
-    fn _cxkk(vx: &mut u8, kk: u8) {
+    fn op_cxkk(&mut self, vx: u8, kk: u8) {
         let mut rng = rand::thread_rng();
-        let randByte: u8 = rng.gen();
+        let rand_byte: u8 = rng.gen();
 
-        *vx = kk & randByte
+        self.registers[vx as usize] &= rand_byte
     }
 
     // The values of I and Vx are added, and the results are stored in I.
@@ -174,8 +183,50 @@ impl Chip8 {
     }
 
     // The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx.
-    fn op_fx29(&mut self) {
-	
+    fn op_fx29(&mut self, vx: u8) {
+        self.i = (self.registers[vx as usize] * 5) as usize
+    }
+
+    // Skip next instruction if key with the value of Vx is pressed.
+    fn op_ex9e(&mut self, vx: u8) {
+        let key = self.registers[vx as usize];
+        if self.keypad[key as usize] {
+            self.program_counter += 2;
+        }
+    }
+
+    // Skip next instruction if key with the value of Vx is not pressed.
+    fn op_exa1(&mut self, vx: u8) {
+        let key = self.registers[vx as usize];
+        if !self.keypad[key as usize] {
+            self.program_counter += 2;
+        }
+    }
+
+    // Set Vx = delay timer value.
+    fn op_fx07(&mut self, vx: u8) {
+        self.registers[vx as usize] = self.delay_timer
+    }
+
+    // Set delay timer = Vx.
+    fn op_fx15(&mut self, vx: u8) {
+        self.delay_timer = self.registers[vx as usize]
+    }
+
+    // Set sound timer = Vx.
+    fn op_fx18(&mut self, vx: u8) {
+        self.sound_timer = self.registers[vx as usize]
+    }
+
+    // The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I, the tens digit at location I+1, and the ones digit at location I+2.
+    fn op_fx33(&mut self, vx: u8) {
+        self.i = ((self.registers[vx as usize] / 100) % 10) as usize;
+        self.i += 1;
+
+        self.i = ((self.registers[vx as usize] / 10) % 10) as usize;
+        self.i += 1;
+
+        self.i = (self.registers[vx as usize] % 10) as usize;
     }
 
     // The interpreter copies the values of registers V0 through Vx into memory, starting at the address in I.
