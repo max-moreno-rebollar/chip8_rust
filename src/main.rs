@@ -218,7 +218,8 @@ impl Chip8 {
         self.sound_timer = self.registers[vx as usize]
     }
 
-    // The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I, the tens digit at location I+1, and the ones digit at location I+2.
+    // The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I,
+    // the tens digit at location I+1, and the ones digit at location I+2.
     fn op_fx33(&mut self, vx: u8) {
         self.i = ((self.registers[vx as usize] / 100) % 10) as usize;
         self.i += 1;
@@ -260,10 +261,43 @@ impl Chip8 {
     }
 
     // Load ROM into memory
-    fn load() {}
+    fn load(&mut self) {
+        let input_bytes = fs::read("IBM Logo.ch8").expect("Error reading input file");
+        for (i, byte) in input_bytes.iter().enumerate() {
+            if 0x200 + i < 4096 {
+                self.memory[0x200 + i] = *byte;
+            }
+        }
+    }
 
     // Game Loop
-    fn tick() {}
+    fn tick(&mut self) {
+        if self.delay_timer > 0 {
+            self.delay_timer -= 1;
+        }
+
+        if self.sound_timer > 0 {
+            self.sound_timer -= 1;
+        }
+
+        let pieces = (
+            self.memory[self.program_counter] >> 4 as u8,
+            self.memory[self.program_counter] & 0xF0 as u8,
+            self.memory[self.program_counter + 1] >> 4 as u8,
+            self.memory[self.program_counter + 1] & 0xF0 as u8,
+        );
+
+        let nnn: usize = ((pieces.2 as u16 | pieces.3 as u16) & 0xFF) as usize;
+        let n: u8 = pieces.3;
+        let vx: u8 = pieces.1;
+        let vy: u8 = pieces.2;
+        let kk: u8 = pieces.2 | pieces.3;
+
+        match pieces {
+            (1, _, _, _) => self.op_1nnn(nnn),
+            (_, _, _, _) => panic!("Error"),
+        }
+    }
 }
 
 fn main() {}
