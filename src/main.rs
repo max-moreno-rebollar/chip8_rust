@@ -20,6 +20,7 @@ struct Chip8 {
     stack: [u16; 16],
     keypad: [bool; 16],
     waiting_for_keypress: bool,
+    keypad_pressed: u8,
     delay_timer: u8,
     sound_timer: u8,
 }
@@ -149,7 +150,7 @@ impl Chip8 {
     }
 
     // If the most-significant bit of Vx is 1, then VF is set to 1, otherwise to 0. Then Vx is multiplied by 2.
-    fn op_8xye(&mut self, vx: u8, vy: u8) {
+    fn op_8xye(&mut self, vx: u8) {
         if ((self.registers[vx as usize] >> 7) & 1) == 1 {
             self.registers[15] = 1;
         } else {
@@ -159,14 +160,22 @@ impl Chip8 {
         self.registers[vx as usize] *= 2
     }
 
+    // Skip next instruction if Vx != Vy.
+    // The values of Vx and Vy are compared, and if they are not equal, the program counter is increased by 2.
+    fn op_9xy0(&mut self, vx: u8, vy: u8) {
+        if self.registers[vx as usize] != self.registers[vy as usize] {
+            self.program_counter += 2;
+        }
+    }
+
     // The value of register I is set to nnn
     fn op_annn(&mut self, nnn: usize) {
         self.i = nnn
     }
 
     // The program counter is set to nnn plus the value of V0.
-    fn op_bnnn(&mut self, nnn: u16) {
-        self.program_counter = (nnn + self.registers[0] as u16) as usize
+    fn op_bnnn(&mut self, nnn: usize) {
+        self.program_counter = nnn + self.registers[0] as usize
     }
 
     // The interpreter generates a random number from 0 to 255, which is then ANDed with the value kk. The results are stored in Vx.
@@ -208,6 +217,12 @@ impl Chip8 {
         self.registers[vx as usize] = self.delay_timer
     }
 
+    //
+    fn op_fx0a(&mut self, vx: u8) {
+        self.waiting_for_keypress = true;
+        self.keypad_pressed = vx;
+    }
+
     // Set delay timer = Vx.
     fn op_fx15(&mut self, vx: u8) {
         self.delay_timer = self.registers[vx as usize]
@@ -245,7 +260,7 @@ impl Chip8 {
     }
 
     // Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
-    fn op_dxyn(&mut self, n: u32, vx: u8, vy: u8, vf: u8) {
+    fn op_dxyn(&mut self, n: usize, vx: u8, vy: u8) {
         let addr: usize = (self.registers[vy as usize] * 64 + self.registers[vx as usize]) as usize;
         self.registers[15] = 0;
         for i in 0..n {
@@ -272,30 +287,73 @@ impl Chip8 {
 
     // Game Loop
     fn tick(&mut self) {
-        if self.delay_timer > 0 {
-            self.delay_timer -= 1;
-        }
+        // TODO
+        // Check if keypad is waiting before running an opcode
+        if self.waiting_for_keypress {
+            for i in 0..16 {
+                if self.keypad[i] {
+                    self.waiting_for_keypress = false;
+                    self.registers[self.keypad_pressed as usize] = i as u8;
+                    break;
+                }
+            }
+        } else {
+            if self.delay_timer > 0 {
+                self.delay_timer -= 1;
+            }
 
-        if self.sound_timer > 0 {
-            self.sound_timer -= 1;
-        }
+            if self.sound_timer > 0 {
+                self.sound_timer -= 1;
+            }
 
-        let pieces = (
-            self.memory[self.program_counter] >> 4 as u8,
-            self.memory[self.program_counter] & 0xF0 as u8,
-            self.memory[self.program_counter + 1] >> 4 as u8,
-            self.memory[self.program_counter + 1] & 0xF0 as u8,
-        );
+            let pieces = (
+                self.memory[self.program_counter] >> 4 as u8,
+                self.memory[self.program_counter] & 0xF0 as u8,
+                self.memory[self.program_counter + 1] >> 4 as u8,
+                self.memory[self.program_counter + 1] & 0xF0 as u8,
+            );
 
-        let nnn: usize = ((pieces.2 as u16 | pieces.3 as u16) & 0xFF) as usize;
-        let n: u8 = pieces.3;
-        let vx: u8 = pieces.1;
-        let vy: u8 = pieces.2;
-        let kk: u8 = pieces.2 | pieces.3;
+            let nnn: usize = ((pieces.2 as u16 | pieces.3 as u16) & 0xFF) as usize;
+            let n: usize = pieces.3 as usize;
+            let vx: u8 = pieces.1;
+            let vy: u8 = pieces.2;
+            let kk: u8 = pieces.2 | pieces.3;
 
-        match pieces {
-            (1, _, _, _) => self.op_1nnn(nnn),
-            (_, _, _, _) => panic!("Error"),
+            match pieces {
+                (0x01, _, _, _) => self.op_1nnn(nnn),
+                (0x02, _, _, _) => self.op_2nnn(nnn),
+                (0x03, _, _, _) => self.op_3xkk(vx, kk),
+                (0x04, _, _, _) => self.op_4xkk(vx, kk),
+                (0x05, _, _, _) => self.op_5xy0(vx, vy),
+                (0x06, _, _, _) => self.op_6xkk(vx, kk),
+                (0x07, _, _, _) => self.op_7xkk(vx, kk),
+                (0x08, _, _, 0x00) => self.op_8xy0(vx, vy),
+                (0x08, _, _, 0x01) => self.op_8xy1(vx, vy),
+                (0x08, _, _, 0x02) => self.op_8xy2(vx, vy),
+                (0x08, _, _, 0x03) => self.op_8xy3(vx, vy),
+                (0x08, _, _, 0x04) => self.op_8xy4(vx, vy),
+                (0x08, _, _, 0x05) => self.op_8xy5(vx, vy),
+                (0x08, _, _, 0x06) => self.op_8xy6(vx),
+                (0x08, _, _, 0x07) => self.op_8xy7(vx, vy),
+                (0x08, _, _, 0x0e) => self.op_8xye(vx),
+                (0x09, _, _, 0x00) => self.op_9xy0(vx, vy),
+                (0x0a, _, _, _) => self.op_annn(nnn),
+                (0x0b, _, _, _) => self.op_bnnn(nnn),
+                (0x0c, _, _, _) => self.op_cxkk(vx, kk),
+                (0x0d, _, _, _) => self.op_dxyn(n, vx, vy),
+                (0x0e, _, 0x09, 0x0e) => self.op_ex9e(vx),
+                (0x0e, _, 0x0a, 0x01) => self.op_exa1(vx),
+                (0x0f, _, 0x00, 0x07) => self.op_fx07(vx),
+                (0x0f, _, 0x00, 0x0a) => self.op_fx0a(vx),
+                (0x0f, _, 0x01, 0x05) => self.op_fx15(vx),
+                (0x0f, _, 0x01, 0x08) => self.op_fx18(vx),
+                (0x0f, _, 0x01, 0x0e) => self.op_fx1e(vx),
+                (0x0f, _, 0x02, 0x09) => self.op_fx29(vx),
+                (0x0f, _, 0x03, 0x03) => self.op_fx33(vx),
+                (0x0f, _, 0x05, 0x05) => self.op_fx55(vx),
+                (0x0f, _, 0x06, 0x05) => self.op_fx65(vx),
+                (_, _, _, _) => panic!("Instruction does not match."),
+            }
         }
     }
 }
