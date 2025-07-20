@@ -2,6 +2,10 @@ use rand::Rng;
 use std::fs;
 use std::thread;
 use std::time::Duration;
+use ggez::graphics::{Canvas, Color, DrawMode, Mesh, Rect};
+use ggez::event::{self, EventHandler};
+use ggez::input::keyboard::KeyCode;
+use ggez::{graphics, Context, GameResult};
 
 pub const FONT: [u8; 81] = [
     0xF0, 0x90, 0x90, 0x90, 0xF0, 0x20, 0x60, 0x20, 0x20, 0x70, 0xF0, 0x10, 0xF0, 0x80, 0xF0, 0x10,
@@ -386,49 +390,128 @@ impl Chip8 {
         }
     }
 
-    fn draw_terminal(&self) {
-        print!("\x1B[2J\x1B[1;1H"); // Clear terminal
+    fn set_key(&mut self, keycode: KeyCode, pressed: bool) {
+        let key = match keycode {
+            KeyCode::Key1 => Some(0x1),
+            KeyCode::Key2 => Some(0x2),
+            KeyCode::Key3 => Some(0x3),
+            KeyCode::Key4 => Some(0xC),
+            KeyCode::Q => Some(0x4),
+            KeyCode::W => Some(0x5),
+            KeyCode::E => Some(0x6),
+            KeyCode::R => Some(0xD),
+            KeyCode::A => Some(0x7),
+            KeyCode::S => Some(0x8),
+            KeyCode::D => Some(0x9),
+            KeyCode::F => Some(0xE),
+            KeyCode::Z => Some(0xA),
+            KeyCode::X => Some(0x0),
+            KeyCode::C => Some(0xB),
+            KeyCode::V => Some(0xF),
+            _ => None,
+        };
+
+        if let Some(k) = key {
+            self.keypad[k] = pressed;
+        }
+    }
+
+    fn draw_ggez(&self, ctx: &mut Context, canvas: &mut Canvas) -> GameResult {
+        let pixel_size = 10.0;
 
         for y in 0..32 {
             for x in 0..64 {
                 let index = y * 64 + x;
-                let pixel = self.display[index];
-                if pixel == 1 {
-                    print!("█"); // You can also use '#' or '▓'
-                } else {
-                    print!(" ");
+                if self.display[index] == 1 {
+                    let rect = Mesh::new_rectangle(
+                        ctx,
+                        DrawMode::fill(),
+                        Rect::new(
+                            x as f32 * pixel_size,
+                            y as f32 * pixel_size,
+                            pixel_size,
+                            pixel_size,
+                        ),
+                        Color::WHITE,
+                    )?;
+                    canvas.draw(&rect, ggez::mint::Point2 { x: 0.0, y: 0.0 });
                 }
             }
-            println!();
         }
+
+        Ok(())
     }
 }
 
-fn main() {
-    let mut chip8 = Chip8 {
-        memory: [0; 4096],
-        registers: [0; 16],
-        display: [0; 2048],
-        i: 0,
-        program_counter: 0x200,
-        stack_pointer: 0,
-        stack: [0; 16],
-        keypad: [false; 16],
-        waiting_for_keypress: false,
-        keypad_pressed: 0,
-        delay_timer: 0,
-        sound_timer: 0,
-    };
+struct MainState {
+    chip8: Chip8,
+}
 
-    for (i, byte) in FONT.iter().enumerate() {
-        chip8.memory[i] = *byte;
+impl MainState {
+    fn new() -> GameResult<MainState> {
+        let mut chip8 = Chip8 {
+            memory: [0; 4096],
+            registers: [0; 16],
+            display: [0; 2048],
+            i: 0,
+            program_counter: 0x200,
+            stack_pointer: 0,
+            stack: [0; 16],
+            keypad: [false; 16],
+            waiting_for_keypress: false,
+            keypad_pressed: 0,
+            delay_timer: 0,
+            sound_timer: 0,
+        };
+
+        // Load font + ROM
+        for (i, byte) in FONT.iter().enumerate() {
+            chip8.memory[i] = *byte;
+        }
+        chip8.load(); // "roms/ibm_logo.ch8"
+
+        Ok(MainState { chip8 })
+    }
+}
+
+impl event::EventHandler<ggez::GameError> for MainState {
+    fn update(&mut self, _ctx: &mut Context) -> GameResult {
+        // Run multiple ticks to simulate ~500Hz CPU
+        for _ in 0..10 {
+            self.chip8.tick();
+        }
+        Ok(())
     }
 
-    chip8.load();
-
-    loop {
-        chip8.tick();
-        chip8.draw_terminal();
-        thread::sleep(Duration::from_millis(16)); // ~60 FPS
+    fn draw(&mut self, ctx: &mut Context) -> GameResult {
+        let mut canvas =
+            graphics::Canvas::from_frame(ctx, graphics::Color::from([0.0, 0.0, 0.0, 1.0]));
+        self.chip8.draw_ggez(ctx, &mut canvas)?;
+        canvas.finish(ctx)?;
+        Ok(())
     }
+
+    fn key_down_event(&mut self, _ctx: &mut Context, input: ggez::input::keyboard::KeyInput, _repeat: bool) -> GameResult {
+        if let Some(keycode) = input.keycode {
+            self.chip8.set_key(keycode, true); // or false
+        }
+        Ok(())
+    }
+
+    fn key_up_event(&mut self, _ctx: &mut Context, input: ggez::input::keyboard::KeyInput) -> GameResult {
+        if let Some(keycode) = input.keycode {
+            self.chip8.set_key(keycode, true); // or false
+        }
+        Ok(())
+    }
+}
+
+pub fn main() -> GameResult {
+    let cb = ggez::ContextBuilder::new("chip8", "your_name_here")
+        .window_setup(ggez::conf::WindowSetup::default().title("CHIP-8 Emulator"))
+        .window_mode(ggez::conf::WindowMode::default().dimensions(640.0, 320.0)); // 64 x 10, 32 x 10
+
+    let (ctx, event_loop) = cb.build()?;
+    let state = MainState::new()?;
+    event::run(ctx, event_loop, state)
 }
