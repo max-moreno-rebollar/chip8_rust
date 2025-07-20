@@ -1,5 +1,7 @@
 use rand::Rng;
 use std::fs;
+use std::thread;
+use std::time::Duration;
 
 pub const FONT: [u8; 81] = [
     0xF0, 0x90, 0x90, 0x90, 0xF0, 0x20, 0x60, 0x20, 0x20, 0x70, 0xF0, 0x10, 0xF0, 0x80, 0xF0, 0x10,
@@ -30,8 +32,10 @@ impl Chip8 {
     // sets the program counter to the address at the top of the stack,
     // then subtracts 1 from the stack pointer.
     fn op_00EE(&mut self) {
-        self.program_counter = self.stack_pointer;
-        self.stack_pointer = self.stack_pointer - 1
+        self.program_counter = self.stack[self.stack_pointer] as usize;
+        if self.stack_pointer > 0 {
+            self.stack_pointer -= 1;
+        }
     }
 
     // Clear display
@@ -183,7 +187,7 @@ impl Chip8 {
         let mut rng = rand::thread_rng();
         let rand_byte: u8 = rng.gen();
 
-        self.registers[vx as usize] &= rand_byte
+        self.registers[vx as usize] = rand_byte & kk;
     }
 
     // The values of I and Vx are added, and the results are stored in I.
@@ -236,13 +240,10 @@ impl Chip8 {
     // The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I,
     // the tens digit at location I+1, and the ones digit at location I+2.
     fn op_fx33(&mut self, vx: u8) {
-        self.i = ((self.registers[vx as usize] / 100) % 10) as usize;
-        self.i += 1;
-
-        self.i = ((self.registers[vx as usize] / 10) % 10) as usize;
-        self.i += 1;
-
-        self.i = (self.registers[vx as usize] % 10) as usize;
+        let val = self.registers[vx as usize];
+        self.memory[self.i] = val / 100;
+        self.memory[self.i + 1] = (val / 10) % 10;
+        self.memory[self.i + 2] = val % 10;
     }
 
     // The interpreter copies the values of registers V0 through Vx into memory, starting at the address in I.
@@ -261,17 +262,26 @@ impl Chip8 {
 
     // Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
     fn op_dxyn(&mut self, n: usize, vx: u8, vy: u8) {
-        let addr: usize = (self.registers[vy as usize] * 64 + self.registers[vx as usize]) as usize;
+        let x = self.registers[vx as usize] as usize % 64;
+        let y = self.registers[vy as usize] as usize % 32;
         self.registers[15] = 0;
-        for i in 0..n {
-            let byte: u8 = self.memory[self.i as usize + i as usize];
 
-            if self.memory[addr + i as usize] != 0 {
-                // conflict
-                self.registers[15] = 1;
+        for byte_idx in 0..n {
+            let byte = self.memory[self.i + byte_idx];
+            for bit in 0..8 {
+                let px = (x + bit) % 64;
+                let py = (y + byte_idx) % 32;
+                let index = py * 64 + px;
+
+                let sprite_pixel = (byte >> (7 - bit)) & 1;
+                let screen_pixel = self.display[index];
+
+                if screen_pixel == 1 && sprite_pixel == 1 {
+                    self.registers[15] = 1;
+                }
+
+                self.display[index] ^= sprite_pixel;
             }
-
-            self.memory[addr + i as usize] = self.memory[addr + i as usize] ^ byte;
         }
     }
 
@@ -285,10 +295,7 @@ impl Chip8 {
         }
     }
 
-    // Game Loop
     fn tick(&mut self) {
-        // TODO
-        // Check if keypad is waiting before running an opcode
         if self.waiting_for_keypress {
             for i in 0..16 {
                 if self.keypad[i] {
@@ -297,65 +304,131 @@ impl Chip8 {
                     break;
                 }
             }
-        } else {
-            if self.delay_timer > 0 {
-                self.delay_timer -= 1;
+            return;
+        }
+
+        // Timers
+        if self.delay_timer > 0 {
+            self.delay_timer -= 1;
+        }
+        if self.sound_timer > 0 {
+            self.sound_timer -= 1;
+        }
+
+        // Fetch opcode
+        let opcode = (self.memory[self.program_counter] as u16) << 8
+            | (self.memory[self.program_counter + 1] as u16);
+        self.program_counter += 2;
+
+        // Decode
+        let nnn = (opcode & 0x0FFF) as usize;
+        let n = (opcode & 0x000F) as usize;
+        let x = ((opcode & 0x0F00) >> 8) as u8;
+        let y = ((opcode & 0x00F0) >> 4) as u8;
+        let kk = (opcode & 0x00FF) as u8;
+
+        match opcode & 0xF000 {
+            0x0000 => match opcode & 0x00FF {
+                0x00E0 => self.op_00E0(),
+                0x00EE => self.op_00EE(),
+                _ => panic!("Unknown 0x0000 opcode: {:#04x}", opcode),
+            },
+            0x1000 => self.op_1nnn(nnn),
+            0x2000 => self.op_2nnn(nnn),
+            0x3000 => self.op_3xkk(x, kk),
+            0x4000 => self.op_4xkk(x, kk),
+            0x5000 => {
+                if opcode & 0x000F == 0 {
+                    self.op_5xy0(x, y);
+                }
             }
-
-            if self.sound_timer > 0 {
-                self.sound_timer -= 1;
+            0x6000 => self.op_6xkk(x, kk),
+            0x7000 => self.op_7xkk(x, kk),
+            0x8000 => match opcode & 0x000F {
+                0x0 => self.op_8xy0(x, y),
+                0x1 => self.op_8xy1(x, y),
+                0x2 => self.op_8xy2(x, y),
+                0x3 => self.op_8xy3(x, y),
+                0x4 => self.op_8xy4(x, y),
+                0x5 => self.op_8xy5(x, y),
+                0x6 => self.op_8xy6(x),
+                0x7 => self.op_8xy7(x, y),
+                0xE => self.op_8xye(x),
+                _ => panic!("Unknown 0x8000 opcode: {:#04x}", opcode),
+            },
+            0x9000 => {
+                if opcode & 0x000F == 0 {
+                    self.op_9xy0(x, y);
+                }
             }
+            0xA000 => self.op_annn(nnn),
+            0xB000 => self.op_bnnn(nnn),
+            0xC000 => self.op_cxkk(x, kk),
+            0xD000 => self.op_dxyn(n, x, y),
+            0xE000 => match opcode & 0x00FF {
+                0x9E => self.op_ex9e(x),
+                0xA1 => self.op_exa1(x),
+                _ => panic!("Unknown 0xE000 opcode: {:#04x}", opcode),
+            },
+            0xF000 => match opcode & 0x00FF {
+                0x07 => self.op_fx07(x),
+                0x0A => self.op_fx0a(x),
+                0x15 => self.op_fx15(x),
+                0x18 => self.op_fx18(x),
+                0x1E => self.op_fx1e(x),
+                0x29 => self.op_fx29(x),
+                0x33 => self.op_fx33(x),
+                0x55 => self.op_fx55(x),
+                0x65 => self.op_fx65(x),
+                _ => panic!("Unknown 0xF000 opcode: {:#04x}", opcode),
+            },
+            _ => panic!("Unknown opcode: {:#04x}", opcode),
+        }
+    }
 
-            let pieces = (
-                self.memory[self.program_counter] >> 4 as u8,
-                self.memory[self.program_counter] & 0xF0 as u8,
-                self.memory[self.program_counter + 1] >> 4 as u8,
-                self.memory[self.program_counter + 1] & 0xF0 as u8,
-            );
+    fn draw_terminal(&self) {
+        print!("\x1B[2J\x1B[1;1H"); // Clear terminal
 
-            let nnn: usize = ((pieces.2 as u16 | pieces.3 as u16) & 0xFF) as usize;
-            let n: usize = pieces.3 as usize;
-            let vx: u8 = pieces.1;
-            let vy: u8 = pieces.2;
-            let kk: u8 = pieces.2 | pieces.3;
-
-            match pieces {
-                (0x01, _, _, _) => self.op_1nnn(nnn),
-                (0x02, _, _, _) => self.op_2nnn(nnn),
-                (0x03, _, _, _) => self.op_3xkk(vx, kk),
-                (0x04, _, _, _) => self.op_4xkk(vx, kk),
-                (0x05, _, _, _) => self.op_5xy0(vx, vy),
-                (0x06, _, _, _) => self.op_6xkk(vx, kk),
-                (0x07, _, _, _) => self.op_7xkk(vx, kk),
-                (0x08, _, _, 0x00) => self.op_8xy0(vx, vy),
-                (0x08, _, _, 0x01) => self.op_8xy1(vx, vy),
-                (0x08, _, _, 0x02) => self.op_8xy2(vx, vy),
-                (0x08, _, _, 0x03) => self.op_8xy3(vx, vy),
-                (0x08, _, _, 0x04) => self.op_8xy4(vx, vy),
-                (0x08, _, _, 0x05) => self.op_8xy5(vx, vy),
-                (0x08, _, _, 0x06) => self.op_8xy6(vx),
-                (0x08, _, _, 0x07) => self.op_8xy7(vx, vy),
-                (0x08, _, _, 0x0e) => self.op_8xye(vx),
-                (0x09, _, _, 0x00) => self.op_9xy0(vx, vy),
-                (0x0a, _, _, _) => self.op_annn(nnn),
-                (0x0b, _, _, _) => self.op_bnnn(nnn),
-                (0x0c, _, _, _) => self.op_cxkk(vx, kk),
-                (0x0d, _, _, _) => self.op_dxyn(n, vx, vy),
-                (0x0e, _, 0x09, 0x0e) => self.op_ex9e(vx),
-                (0x0e, _, 0x0a, 0x01) => self.op_exa1(vx),
-                (0x0f, _, 0x00, 0x07) => self.op_fx07(vx),
-                (0x0f, _, 0x00, 0x0a) => self.op_fx0a(vx),
-                (0x0f, _, 0x01, 0x05) => self.op_fx15(vx),
-                (0x0f, _, 0x01, 0x08) => self.op_fx18(vx),
-                (0x0f, _, 0x01, 0x0e) => self.op_fx1e(vx),
-                (0x0f, _, 0x02, 0x09) => self.op_fx29(vx),
-                (0x0f, _, 0x03, 0x03) => self.op_fx33(vx),
-                (0x0f, _, 0x05, 0x05) => self.op_fx55(vx),
-                (0x0f, _, 0x06, 0x05) => self.op_fx65(vx),
-                (_, _, _, _) => panic!("Instruction does not match."),
+        for y in 0..32 {
+            for x in 0..64 {
+                let index = y * 64 + x;
+                let pixel = self.display[index];
+                if pixel == 1 {
+                    print!("█"); // You can also use '#' or '▓'
+                } else {
+                    print!(" ");
+                }
             }
+            println!();
         }
     }
 }
 
-fn main() {}
+fn main() {
+    let mut chip8 = Chip8 {
+        memory: [0; 4096],
+        registers: [0; 16],
+        display: [0; 2048],
+        i: 0,
+        program_counter: 0x200,
+        stack_pointer: 0,
+        stack: [0; 16],
+        keypad: [false; 16],
+        waiting_for_keypress: false,
+        keypad_pressed: 0,
+        delay_timer: 0,
+        sound_timer: 0,
+    };
+
+    for (i, byte) in FONT.iter().enumerate() {
+        chip8.memory[i] = *byte;
+    }
+
+    chip8.load();
+
+    loop {
+        chip8.tick();
+        chip8.draw_terminal();
+        thread::sleep(Duration::from_millis(16)); // ~60 FPS
+    }
+}
