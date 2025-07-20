@@ -2,6 +2,9 @@
 
 This is a fully functional CHIP-8 emulator written in Rust using the [`ggez`](https://github.com/ggez/ggez) game framework. It was built from scratch to deepen my understanding of systems programming, low-level architecture, and graphics/input processing.
 
+![Demo](assets/ibm.png)
+![Demo](assets/demo.gif)
+
 ### Systems Programming with Rust
 - Managed memory safely without garbage collection
 - Used enums and pattern matching to decode and execute 35+ opcodes
