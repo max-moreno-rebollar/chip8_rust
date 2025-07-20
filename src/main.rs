@@ -39,6 +39,8 @@ struct Chip8 {
     keypad_pressed: u8,
     delay_timer: u8,
     sound_timer: u8,
+    prev_keypad: [bool; 16],
+    key_hold_ticks: [u32; 16],
 }
 
 impl Chip8 {
@@ -217,16 +219,39 @@ impl Chip8 {
     // Skip next instruction if key with the value of Vx is pressed.
     fn op_ex9e(&mut self, vx: u8) {
         let key = self.registers[vx as usize];
-        if (key as usize) < 16 && self.keypad[key as usize] {
-            self.program_counter += 2;
-        }
+        let k = key as usize;
+        if k < 16 && self.keypad[k] {
+            let is_new_press = !self.prev_keypad[k];
+            let hold_time = self.key_hold_ticks[k];
+
+            // Trigger on new press or every N ticks held
+            if is_new_press || hold_time % 5 == 0 {
+                self.program_counter += 2;
+            }
+}
     }
 
     // Skip next instruction if key with the value of Vx is not pressed.
     fn op_exa1(&mut self, vx: u8) {
-        let key = self.registers[vx as usize];
-        if (key as usize) < 16 && !self.keypad[key as usize] {
-            self.program_counter += 2;
+        let key = self.registers[vx as usize] as usize;
+
+
+        if key >= 16 {
+            return; // Invalid key — ignore
+        }
+
+        if key < 16 {
+            let is_pressed = self.keypad[key];
+            let was_pressed = self.prev_keypad[key];
+            let hold_time = self.key_hold_ticks[key];
+
+            let is_new_press = !was_pressed && is_pressed;
+            let should_repeat = hold_time > 0 && hold_time % 5 == 0;
+
+            // Skip if NOT pressed or (still pressed but not in repeat window)
+            if !is_pressed || (!is_new_press && !should_repeat) {
+                self.program_counter += 2;
+            }
         }
     }
 
@@ -310,6 +335,16 @@ impl Chip8 {
     }
 
     fn tick(&mut self) {
+        for i in 0..16 {
+            if self.keypad[i] {
+                self.key_hold_ticks[i] += 1;
+            } else {
+                self.key_hold_ticks[i] = 0;
+            }
+        }
+
+        self.prev_keypad = self.keypad;
+
         if self.waiting_for_keypress {
             for i in 0..16 {
                 if self.keypad[i] {
@@ -333,6 +368,7 @@ impl Chip8 {
         let opcode = (self.memory[self.program_counter] as u16) << 8
             | (self.memory[self.program_counter + 1] as u16);
         self.program_counter += 2;
+
 
         // Decode
         let nnn = (opcode & 0x0FFF) as usize;
@@ -472,6 +508,8 @@ impl MainState {
             keypad_pressed: 0,
             delay_timer: 0,
             sound_timer: 0,
+            prev_keypad: [false; 16],
+            key_hold_ticks: [0; 16],
         };
 
         // Load font + ROM
@@ -503,14 +541,14 @@ impl event::EventHandler<ggez::GameError> for MainState {
 
     fn key_down_event(&mut self, _ctx: &mut Context, input: ggez::input::keyboard::KeyInput, _repeat: bool) -> GameResult {
         if let Some(keycode) = input.keycode {
-            self.chip8.set_key(keycode, true); // or false
+            self.chip8.set_key(keycode, true);
         }
         Ok(())
     }
 
     fn key_up_event(&mut self, _ctx: &mut Context, input: ggez::input::keyboard::KeyInput) -> GameResult {
         if let Some(keycode) = input.keycode {
-            self.chip8.set_key(keycode, true); // or false
+            self.chip8.set_key(keycode, false);
         }
         Ok(())
     }
